@@ -1,0 +1,59 @@
+# DNS Override Configuration File
+# This file configures upstream DNS servers to use instead of system defaults
+# Format: key value
+# Lines starting with # are comments
+#
+# Configuration file location:
+#   Default: /tmp/dns_override.conf
+#   Custom:  Set DNS_OVERRIDE_CONFIG environment variable
+#   Example: export DNS_OVERRIDE_CONFIG=/etc/dns_override.conf
+
+# DNS servers to use (can specify multiple)
+# Format: dns_server IP[:PORT]
+dns_server 8.8.8.8:53
+dns_server 8.8.4.4:53
+dns_server 1.1.1.1:53
+dns_server 1.0.0.1:53
+
+# Alternative DNS providers (uncomment to use):
+# Cloudflare DNS
+# dns_server 1.1.1.1:53
+# dns_server 1.0.0.1:53
+
+# Quad9 DNS (blocks malicious domains)
+# dns_server 9.9.9.9:53
+# dns_server 149.112.112.112:53
+
+# OpenDNS
+# dns_server 208.67.222.222:53
+# dns_server 208.67.220.220:53
+
+# AdGuard DNS (blocks ads)
+# dns_server 94.140.14.14:53
+# dns_server 94.140.15.15:53
+
+# Timeout in milliseconds (default: 5000)
+timeout 5000
+
+# Use TCP instead of UDP (default: false)
+use_tcp false
+
+# Enable debug output (default: false)
+debug true
+
+# DNS64 Configuration
+# Enable DNS64 synthesis - creates IPv6 addresses from IPv4 addresses
+# This is useful for IPv6-only networks that need to access IPv4-only services
+enable_dns64 true
+
+# DNS64 prefix (default: 64:ff9b::)
+# Common prefixes:
+#   64:ff9b::/96     - Well-known prefix (RFC 6052)
+#   2001:db8:64::/96 - Documentation prefix
+#   fd00:64::/96     - Local prefix example
+dns64_prefix 64:ff9b::
+
+# Filter out AAAA records from upstream DNS responses
+# This forces DNS64 synthesis even when native IPv6 addresses exist
+# Useful for testing IPv6-only networks or ensuring all traffic goes through DNS64
+filter_aaaa false
