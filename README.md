@@ -447,12 +447,9 @@ The Makefile supports several build configurations:
 
 ## License
 
-This project is released under the MIT License. See the source code for details.
+This project is released under the Apache License, version 2.0.
 
-## Contributing
+## Support & Contributing
 
-Contributions are welcome! Please feel free to submit issues and pull requests.
+This is only a proof of concept, do not use in production
 
-## Support
-
-For questions and support, please check the documentation or create an issue in the project repository.
