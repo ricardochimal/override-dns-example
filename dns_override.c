@@ -30,6 +30,7 @@ static const char* get_config_file_path() {
 struct dns_config {
     char dns_servers[MAX_DNS_SERVERS][46]; // Support both IPv4 and IPv6
     int dns_ports[MAX_DNS_SERVERS];
+    int dns_families[MAX_DNS_SERVERS]; // AF_INET or AF_INET6
     int server_count;
     int timeout_ms;
     int use_tcp;
@@ -94,20 +95,90 @@ static void load_dns_config() {
         char key[256], value[256];
         if (sscanf(line, "%255s %255s", key, value) == 2) {
             if (strcmp(key, "dns_server") == 0 && config.server_count < MAX_DNS_SERVERS) {
-                char *port_str = strchr(value, ':');
-                if (port_str) {
-                    *port_str = '\0';
-                    port_str++;
-                    config.dns_ports[config.server_count] = atoi(port_str);
+                char server_addr[46];
+                int port = DEFAULT_DNS_PORT;
+                int family = AF_INET; // Default to IPv4
+                
+                // Check if this is an IPv6 address with port: [address]:port
+                if (value[0] == '[') {
+                    char *bracket_end = strchr(value, ']');
+                    if (bracket_end) {
+                        // Extract IPv6 address from brackets
+                        size_t addr_len = bracket_end - value - 1;
+                        if (addr_len < sizeof(server_addr)) {
+                            strncpy(server_addr, value + 1, addr_len);
+                            server_addr[addr_len] = '\0';
+                            family = AF_INET6;
+                            
+                            // Check for port after the bracket
+                            if (*(bracket_end + 1) == ':') {
+                                port = atoi(bracket_end + 2);
+                            }
+                        } else {
+                            continue; // Address too long
+                        }
+                    } else {
+                        continue; // Malformed IPv6 address
+                    }
                 } else {
-                    config.dns_ports[config.server_count] = DEFAULT_DNS_PORT;
+                    // IPv4 address or IPv6 without brackets
+                    char *port_str = strrchr(value, ':');
+                    
+                    // Try to determine if this is IPv6 by checking for multiple colons
+                    int colon_count = 0;
+                    for (char *p = value; *p; p++) {
+                        if (*p == ':') colon_count++;
+                    }
+                    
+                    if (colon_count > 1) {
+                        // Likely IPv6 address without port
+                        strncpy(server_addr, value, sizeof(server_addr) - 1);
+                        server_addr[sizeof(server_addr) - 1] = '\0';
+                        family = AF_INET6;
+                    } else if (port_str) {
+                        // IPv4 with port
+                        size_t addr_len = port_str - value;
+                        if (addr_len < sizeof(server_addr)) {
+                            strncpy(server_addr, value, addr_len);
+                            server_addr[addr_len] = '\0';
+                            port = atoi(port_str + 1);
+                            family = AF_INET;
+                        } else {
+                            continue; // Address too long
+                        }
+                    } else {
+                        // IPv4 without port
+                        strncpy(server_addr, value, sizeof(server_addr) - 1);
+                        server_addr[sizeof(server_addr) - 1] = '\0';
+                        family = AF_INET;
+                    }
                 }
-                strncpy(config.dns_servers[config.server_count], value, 
-                       sizeof(config.dns_servers[config.server_count]) - 1);
-                config.dns_servers[config.server_count][sizeof(config.dns_servers[config.server_count]) - 1] = '\0';
-                fprintf(stderr, "[DNS Override] Added DNS server: %s:%d\n", 
-                       config.dns_servers[config.server_count], config.dns_ports[config.server_count]);
-                config.server_count++;
+                
+                // Validate the address format
+                struct sockaddr_in addr4;
+                struct sockaddr_in6 addr6;
+                int valid = 0;
+                
+                if (family == AF_INET) {
+                    valid = (inet_pton(AF_INET, server_addr, &addr4.sin_addr) == 1);
+                } else {
+                    valid = (inet_pton(AF_INET6, server_addr, &addr6.sin6_addr) == 1);
+                }
+                
+                if (valid) {
+                    strncpy(config.dns_servers[config.server_count], server_addr,
+                           sizeof(config.dns_servers[config.server_count]) - 1);
+                    config.dns_servers[config.server_count][sizeof(config.dns_servers[config.server_count]) - 1] = '\0';
+                    config.dns_ports[config.server_count] = port;
+                    config.dns_families[config.server_count] = family;
+                    
+                    const char* family_str = (family == AF_INET6) ? "IPv6" : "IPv4";
+                    fprintf(stderr, "[DNS Override] Added %s DNS server: %s:%d\n", 
+                           family_str, config.dns_servers[config.server_count], port);
+                    config.server_count++;
+                } else {
+                    fprintf(stderr, "[DNS Override] Invalid DNS server address: %s\n", value);
+                }
             } else if (strcmp(key, "timeout") == 0) {
                 config.timeout_ms = atoi(value);
             } else if (strcmp(key, "use_tcp") == 0) {
@@ -579,18 +650,40 @@ int getaddrinfo(const char *node, const char *service,
     // Modify resolver to use our DNS servers
     res_init();
     _res.nscount = 0;
+    _res._u._ext.nscount6 = 0;
     
     for (int i = 0; i < config.server_count && i < MAXNS; i++) {
-        struct sockaddr_in *ns = (struct sockaddr_in*)&_res.nsaddr_list[i];
-        memset(ns, 0, sizeof(*ns));
-        ns->sin_family = AF_INET;
-        ns->sin_port = htons(config.dns_ports[i]);
-        
-        if (inet_pton(AF_INET, config.dns_servers[i], &ns->sin_addr) == 1) {
-            _res.nscount++;
-            if (config.debug && node) {
-                fprintf(stderr, "[DNS Override] Using nameserver: %s:%d for %s\n", 
-                       config.dns_servers[i], config.dns_ports[i], node);
+        if (config.dns_families[i] == AF_INET) {
+            // IPv4 nameserver
+            struct sockaddr_in *ns = (struct sockaddr_in*)&_res.nsaddr_list[i];
+            memset(ns, 0, sizeof(*ns));
+            ns->sin_family = AF_INET;
+            ns->sin_port = htons(config.dns_ports[i]);
+            
+            if (inet_pton(AF_INET, config.dns_servers[i], &ns->sin_addr) == 1) {
+                _res.nscount++;
+                if (config.debug && node) {
+                    fprintf(stderr, "[DNS Override] Using IPv4 nameserver: %s:%d for %s\n", 
+                           config.dns_servers[i], config.dns_ports[i], node);
+                }
+            }
+        } else if (config.dns_families[i] == AF_INET6 && _res._u._ext.nscount6 < MAXNS) {
+            // IPv6 nameserver - allocate and store in the nsaddrs array
+            struct sockaddr_in6 *ns6 = calloc(1, sizeof(struct sockaddr_in6));
+            if (ns6) {
+                ns6->sin6_family = AF_INET6;
+                ns6->sin6_port = htons(config.dns_ports[i]);
+                
+                if (inet_pton(AF_INET6, config.dns_servers[i], &ns6->sin6_addr) == 1) {
+                    _res._u._ext.nsaddrs[_res._u._ext.nscount6] = ns6;
+                    _res._u._ext.nscount6++;
+                    if (config.debug && node) {
+                        fprintf(stderr, "[DNS Override] Using IPv6 nameserver: %s:%d for %s\n", 
+                               config.dns_servers[i], config.dns_ports[i], node);
+                    }
+                } else {
+                    free(ns6);
+                }
             }
         }
     }
@@ -608,7 +701,13 @@ int getaddrinfo(const char *node, const char *service,
         if (config.filter_aaaa) {
             int filtered = filter_aaaa_records(res);
             if (filtered < 0) {
-                // Error in filtering, restore original state and return error
+                // Error in filtering, clean up and restore original state
+                for (int i = 0; i < _res._u._ext.nscount6; i++) {
+                    if (_res._u._ext.nsaddrs[i]) {
+                        free(_res._u._ext.nsaddrs[i]);
+                        _res._u._ext.nsaddrs[i] = NULL;
+                    }
+                }
                 memcpy(&_res, &original_state, sizeof(_res));
                 return EAI_MEMORY;
             }
@@ -634,13 +733,27 @@ int getaddrinfo(const char *node, const char *service,
         if (config.filter_a && *res) {
             int filtered = filter_a_records(res);
             if (filtered < 0) {
-                // Error in filtering, restore original state and return error
+                // Error in filtering, clean up and restore original state
+                for (int i = 0; i < _res._u._ext.nscount6; i++) {
+                    if (_res._u._ext.nsaddrs[i]) {
+                        free(_res._u._ext.nsaddrs[i]);
+                        _res._u._ext.nsaddrs[i] = NULL;
+                    }
+                }
                 memcpy(&_res, &original_state, sizeof(_res));
                 return EAI_MEMORY;
             }
             if (filtered > 0 && config.debug) {
                 fprintf(stderr, "[DNS Override] Removed %d IPv4 addresses from final results for %s\n", filtered, node);
             }
+        }
+    }
+    
+    // Clean up allocated IPv6 nameserver memory
+    for (int i = 0; i < _res._u._ext.nscount6; i++) {
+        if (_res._u._ext.nsaddrs[i]) {
+            free(_res._u._ext.nsaddrs[i]);
+            _res._u._ext.nsaddrs[i] = NULL;
         }
     }
     

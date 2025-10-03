@@ -71,14 +71,39 @@ add_server() {
     local server="$1"
     
     if [[ -z "$server" ]]; then
-        echo "Error: DNS server IP is required"
+        echo "Error: DNS server is required"
+        echo "Format: IP[:PORT] or [IPv6]:PORT"
+        echo "Examples:"
+        echo "  8.8.8.8"
+        echo "  8.8.8.8:53"
+        echo "  2001:4860:4860::8888"
+        echo "  [2001:4860:4860::8844]:53"
         exit 1
     fi
     
-    # Validate IP address format (basic validation)
-    local ip=$(echo "$server" | cut -d':' -f1)
-    if [[ ! "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ ! "$ip" =~ ^[0-9a-fA-F:]+$ ]]; then
-        echo "Error: Invalid IP address format"
+    # Improved validation for IPv4 and IPv6 addresses
+    local is_valid=0
+    
+    # Check for IPv6 with brackets: [address]:port
+    if [[ "$server" =~ ^\[([0-9a-fA-F:]+)\](:([0-9]+))?$ ]]; then
+        local ipv6_addr="${BASH_REMATCH[1]}"
+        # Basic IPv6 validation (contains colons and hex characters)
+        if [[ "$ipv6_addr" =~ ^[0-9a-fA-F:]+$ ]] && [[ "$ipv6_addr" == *":"* ]]; then
+            is_valid=1
+        fi
+    # Check for IPv6 without brackets (multiple colons indicate IPv6)
+    elif [[ "$server" =~ ^[0-9a-fA-F:]+$ ]] && [[ $(echo "$server" | tr -cd ':' | wc -c) -gt 1 ]]; then
+        is_valid=1
+    # Check for IPv4 with optional port
+    elif [[ "$server" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(:([0-9]+))?$ ]]; then
+        is_valid=1
+    fi
+    
+    if [[ $is_valid -eq 0 ]]; then
+        echo "Error: Invalid DNS server format: $server"
+        echo "Supported formats:"
+        echo "  IPv4: 8.8.8.8 or 8.8.8.8:53"
+        echo "  IPv6: 2001:4860:4860::8888 or [2001:4860:4860::8844]:53"
         exit 1
     fi
     

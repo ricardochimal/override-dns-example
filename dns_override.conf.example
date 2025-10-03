@@ -9,20 +9,26 @@
 #   Example: export DNS_OVERRIDE_CONFIG=/etc/dns_override.conf
 
 # DNS servers to use (can specify multiple)
-# Format: dns_server IP[:PORT]
+# Format: dns_server IP[:PORT] or [IPv6]:PORT
 dns_server 8.8.8.8:53
 dns_server 8.8.4.4:53
 dns_server 1.1.1.1:53
 dns_server 1.0.0.1:53
 
 # Alternative DNS providers (uncomment to use):
-# Cloudflare DNS
-# dns_server 1.1.1.1:53
-# dns_server 1.0.0.1:53
+# Cloudflare DNS (IPv6)
+# dns_server 2606:4700:4700::1111
+# dns_server [2606:4700:4700::1001]:53
+
+# Google DNS (IPv6)
+# dns_server 2001:4860:4860::8888
+# dns_server [2001:4860:4860::8844]:53
 
 # Quad9 DNS (blocks malicious domains)
 # dns_server 9.9.9.9:53
 # dns_server 149.112.112.112:53
+# dns_server 2620:fe::fe
+# dns_server [2620:fe::9]:53
 
 # OpenDNS
 # dns_server 208.67.222.222:53
