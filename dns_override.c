@@ -37,6 +37,7 @@ struct dns_config {
     int enable_dns64;
     char dns64_prefix[46]; // DNS64 prefix (e.g., "64:ff9b::/96")
     int filter_aaaa; // Filter out AAAA records before DNS64 synthesis
+    int filter_a;    // Filter out A (IPv4) records from final results
 };
 
 static struct dns_config config = {0};
@@ -59,6 +60,7 @@ static void load_dns_config() {
     config.debug = 0;
     config.enable_dns64 = 0;
     config.filter_aaaa = 0;
+    config.filter_a = 0;  // Default: don't filter A records
     strncpy(config.dns64_prefix, "64:ff9b::", sizeof(config.dns64_prefix) - 1);
     config.dns64_prefix[sizeof(config.dns64_prefix) - 1] = '\0';
     
@@ -125,6 +127,11 @@ static void load_dns_config() {
                 config.filter_aaaa = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
                 if (config.filter_aaaa) {
                     fprintf(stderr, "[DNS Override] AAAA record filtering enabled - native IPv6 addresses will be removed\n");
+                }
+            } else if (strcmp(key, "filter_a") == 0) {
+                config.filter_a = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
+                if (config.filter_a) {
+                    fprintf(stderr, "[DNS Override] A record filtering enabled - IPv4 addresses will be removed from final results\n");
                 }
             }
         }
@@ -274,15 +281,15 @@ static int filter_aaaa_records(struct addrinfo **result) {
         return 0;
     }
     
-    struct addrinfo *current = *result;
-    struct addrinfo *prev = NULL;
+    struct addrinfo *original_result = *result;
+    struct addrinfo *new_result = NULL;
+    struct addrinfo *last_new = NULL;
+    struct addrinfo *current = original_result;
     int removed_count = 0;
     
     while (current) {
         if (current->ai_family == AF_INET6) {
-            // This is an IPv6 address, remove it
-            struct addrinfo *to_remove = current;
-            
+            // This is an IPv6 address, skip it (don't copy to new result)
             if (config.debug) {
                 char ipv6_str[INET6_ADDRSTRLEN];
                 struct sockaddr_in6 *ipv6_addr = (struct sockaddr_in6 *)current->ai_addr;
@@ -290,29 +297,153 @@ static int filter_aaaa_records(struct addrinfo **result) {
                     fprintf(stderr, "[DNS Override] Filtering out AAAA record: %s\n", ipv6_str);
                 }
             }
-            
-            // Update links
-            if (prev) {
-                prev->ai_next = current->ai_next;
-            } else {
-                *result = current->ai_next;
-            }
-            
-            current = current->ai_next;
-            
-            // Free the removed record
-            free(to_remove->ai_addr);
-            free(to_remove);
             removed_count++;
         } else {
-            // Keep this record (IPv4)
-            prev = current;
-            current = current->ai_next;
+            // This is an IPv4 address, copy it to new result
+            struct addrinfo *new_ai = malloc(sizeof(struct addrinfo));
+            if (!new_ai) {
+                // Memory allocation failed, clean up and return error
+                if (new_result) {
+                    freeaddrinfo(new_result);
+                }
+                return -1;
+            }
+            
+            // Copy the addrinfo structure
+            memcpy(new_ai, current, sizeof(struct addrinfo));
+            
+            // Allocate and copy the sockaddr structure
+            new_ai->ai_addr = malloc(current->ai_addrlen);
+            if (!new_ai->ai_addr) {
+                free(new_ai);
+                if (new_result) {
+                    freeaddrinfo(new_result);
+                }
+                return -1;
+            }
+            memcpy(new_ai->ai_addr, current->ai_addr, current->ai_addrlen);
+            
+            // Copy canonname if it exists
+            if (current->ai_canonname) {
+                new_ai->ai_canonname = strdup(current->ai_canonname);
+                if (!new_ai->ai_canonname) {
+                    free(new_ai->ai_addr);
+                    free(new_ai);
+                    if (new_result) {
+                        freeaddrinfo(new_result);
+                    }
+                    return -1;
+                }
+            } else {
+                new_ai->ai_canonname = NULL;
+            }
+            
+            new_ai->ai_next = NULL;
+            
+            // Add to new result chain
+            if (last_new) {
+                last_new->ai_next = new_ai;
+            } else {
+                new_result = new_ai;
+            }
+            last_new = new_ai;
         }
+        current = current->ai_next;
     }
+    
+    // Free the original result and replace with filtered result
+    freeaddrinfo(original_result);
+    *result = new_result;
     
     if (removed_count > 0 && config.debug) {
         fprintf(stderr, "[DNS Override] Filtered out %d AAAA records\n", removed_count);
+    }
+    
+    return removed_count;
+}
+
+// Filter out A (IPv4) records from DNS results
+static int filter_a_records(struct addrinfo **result) {
+    if (!config.filter_a || !*result) {
+        return 0;
+    }
+    
+    struct addrinfo *original_result = *result;
+    struct addrinfo *new_result = NULL;
+    struct addrinfo *last_new = NULL;
+    struct addrinfo *current = original_result;
+    int removed_count = 0;
+    
+    while (current) {
+        if (current->ai_family == AF_INET) {
+            // This is an IPv4 address, skip it (don't copy to new result)
+            if (config.debug) {
+                char ipv4_str[INET_ADDRSTRLEN];
+                struct sockaddr_in *ipv4_addr = (struct sockaddr_in *)current->ai_addr;
+                if (inet_ntop(AF_INET, &ipv4_addr->sin_addr, ipv4_str, sizeof(ipv4_str))) {
+                    fprintf(stderr, "[DNS Override] Filtering out A record: %s\n", ipv4_str);
+                }
+            }
+            removed_count++;
+        } else {
+            // This is an IPv6 address, copy it to new result
+            struct addrinfo *new_ai = malloc(sizeof(struct addrinfo));
+            if (!new_ai) {
+                // Memory allocation failed, clean up and return error
+                if (new_result) {
+                    freeaddrinfo(new_result);
+                }
+                return -1;
+            }
+            
+            // Copy the addrinfo structure
+            memcpy(new_ai, current, sizeof(struct addrinfo));
+            
+            // Allocate and copy the sockaddr structure
+            new_ai->ai_addr = malloc(current->ai_addrlen);
+            if (!new_ai->ai_addr) {
+                free(new_ai);
+                if (new_result) {
+                    freeaddrinfo(new_result);
+                }
+                return -1;
+            }
+            memcpy(new_ai->ai_addr, current->ai_addr, current->ai_addrlen);
+            
+            // Copy canonname if it exists
+            if (current->ai_canonname) {
+                new_ai->ai_canonname = strdup(current->ai_canonname);
+                if (!new_ai->ai_canonname) {
+                    free(new_ai->ai_addr);
+                    free(new_ai);
+                    if (new_result) {
+                        freeaddrinfo(new_result);
+                    }
+                    return -1;
+                }
+            } else {
+                new_ai->ai_canonname = NULL;
+            }
+            
+            new_ai->ai_next = NULL;
+            
+            // Add to new result chain
+            if (last_new) {
+                last_new->ai_next = new_ai;
+            } else {
+                new_result = new_ai;
+            }
+            last_new = new_ai;
+        }
+        current = current->ai_next;
+    }
+    
+    // Free the original result and replace with filtered result
+    freeaddrinfo(original_result);
+    *result = new_result;
+    
+    if (removed_count > 0 && config.debug) {
+        fprintf(stderr, "[DNS Override] Filtered out %d A records\n", removed_count);
     }
     
     return removed_count;
@@ -476,6 +607,11 @@ int getaddrinfo(const char *node, const char *service,
         // First, filter out AAAA records if requested
         if (config.filter_aaaa) {
             int filtered = filter_aaaa_records(res);
+            if (filtered < 0) {
+                // Error in filtering, restore original state and return error
+                memcpy(&_res, &original_state, sizeof(_res));
+                return EAI_MEMORY;
+            }
             if (filtered > 0 && config.debug) {
                 fprintf(stderr, "[DNS Override] Removed %d native IPv6 addresses for %s\n", filtered, node);
             }
@@ -491,6 +627,19 @@ int getaddrinfo(const char *node, const char *service,
             
             if (added > 0 && config.debug) {
                 fprintf(stderr, "[DNS Override] Added %d DNS64 synthetic addresses for %s\n", added, node);
+            }
+        }
+        
+        // Finally, filter out A records if requested (after DNS64 synthesis)
+        if (config.filter_a && *res) {
+            int filtered = filter_a_records(res);
+            if (filtered < 0) {
+                // Error in filtering, restore original state and return error
+                memcpy(&_res, &original_state, sizeof(_res));
+                return EAI_MEMORY;
+            }
+            if (filtered > 0 && config.debug) {
+                fprintf(stderr, "[DNS Override] Removed %d IPv4 addresses from final results for %s\n", filtered, node);
             }
         }
     }

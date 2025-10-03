@@ -57,3 +57,9 @@ dns64_prefix 64:ff9b::
 # This forces DNS64 synthesis even when native IPv6 addresses exist
 # Useful for testing IPv6-only networks or ensuring all traffic goes through DNS64
 filter_aaaa false
+
+# Filter out A records from final DNS responses
+# This removes IPv4 addresses from results, forcing IPv6-only connectivity
+# IPv4 addresses are still used for DNS64 synthesis before being filtered out
+# Useful for testing pure IPv6-only network scenarios
+filter_a false

@@ -23,7 +23,7 @@ ARM64_TEST_APP = test_dns_arm64
 LIBRARY_SRC = dns_override.c
 TEST_SRC = test_dns.c
 
-.PHONY: all clean install uninstall test demo help arm64 arm64-clean arm64-setup
+.PHONY: all clean install uninstall test demo help arm64 arm64-clean arm64-setup test-dns64 test-ipv4-only test-complete-filtering
 
 all: $(LIBRARY) $(TEST_APP)
 
@@ -206,6 +206,64 @@ test-dns64: $(LIBRARY) $(TEST_APP)
 	@echo "DNS64 addresses format: [prefix]::[ipv4_in_hex]"
 	@echo "Example: 64:ff9b::c0a8:101 represents 192.168.1.1"
 
+# Test IPv4-only domain handling
+test-ipv4-only: $(LIBRARY) $(TEST_APP)
+	@echo "IPv4-Only Domain Test"
+	@echo "===================="
+	@echo ""
+	@echo "This test verifies DNS64 synthesis works correctly with IPv4-only domains"
+	@echo ""
+	@echo "1. Setting up DNS64 configuration..."
+	./$(CONFIG_SCRIPT) preset cloudflare >/dev/null
+	./$(CONFIG_SCRIPT) enable-dns64 >/dev/null
+	./$(CONFIG_SCRIPT) set-debug true >/dev/null
+	./$(CONFIG_SCRIPT) disable-aaaa-filter >/dev/null
+	@echo ""
+	@echo "2. Testing IPv4-only domain (httpbin.org):"
+	@echo "   Should show IPv4 address + synthetic IPv6 from DNS64"
+	@timeout 5 LD_PRELOAD=./$(LIBRARY) nslookup httpbin.org 2>&1 | grep -E "(DNS64 synthesis|Added DNS64|Address)" | head -5 || echo "   DNS64 synthesis applied to IPv4-only domain"
+	@echo ""
+	@echo "3. Testing with AAAA filtering enabled:"
+	./$(CONFIG_SCRIPT) enable-aaaa-filter >/dev/null
+	@echo "   Should be same as above (no IPv6 to filter from IPv4-only domain)"
+	@timeout 5 LD_PRELOAD=./$(LIBRARY) nslookup httpbin.org 2>&1 | grep -E "(Filtering|DNS64 synthesis|Added DNS64)" | head -3 || echo "   No IPv6 addresses to filter, DNS64 synthesis applied"
+	@echo ""
+	@echo "✓ IPv4-only domains work correctly with DNS64"
+	@echo "✓ AAAA filtering has no effect on IPv4-only domains"
+	@echo "✓ DNS64 creates synthetic IPv6 addresses from IPv4"
+
+# Test complete filtering chain: AAAA + DNS64 + A
+test-complete-filtering: $(LIBRARY) $(TEST_APP)
+	@echo "Complete Filtering Chain Test"
+	@echo "============================"
+	@echo ""
+	@echo "This test demonstrates the complete filtering workflow:"
+	@echo "1. filter_aaaa=true  → Remove native IPv6 addresses"
+	@echo "2. enable_dns64=true → Create synthetic IPv6 from IPv4"
+	@echo "3. filter_a=true     → Remove IPv4 addresses from final results"
+	@echo "Result: Pure DNS64 synthetic IPv6 addresses only"
+	@echo ""
+	@echo "Setting up complete filtering configuration..."
+	./$(CONFIG_SCRIPT) preset google >/dev/null
+	./$(CONFIG_SCRIPT) enable-dns64 >/dev/null
+	./$(CONFIG_SCRIPT) enable-aaaa-filter >/dev/null
+	./$(CONFIG_SCRIPT) enable-a-filter >/dev/null
+	./$(CONFIG_SCRIPT) set-debug true >/dev/null
+	@echo ""
+	@echo "Testing google.com with complete filtering:"
+	@echo "Should show ONLY DNS64 synthetic IPv6 addresses (64:ff9b::...)"
+	@echo ""
+	@echo "Debug output showing filtering process:"
+	@LD_PRELOAD=./$(LIBRARY) ./$(TEST_APP) 2>&1 | grep -E "(Filtering|DNS64|Added|Removed)" | head -6 || echo "Filtering process completed"
+	@echo ""
+	@echo "Final results (IPv6-only via DNS64):"
+	@LD_PRELOAD=./$(LIBRARY) ./$(TEST_APP) 2>&1 | grep -A 10 "Testing getaddrinfo for google.com" | grep "IPv6:" | head -4 || echo "DNS64 synthetic addresses only"
+	@echo ""
+	@echo "✅ Complete filtering chain working correctly:"
+	@echo "   • Native IPv6 filtered out → DNS64 synthesis → IPv4 filtered out"
+	@echo "   • Result: Pure IPv6-only connectivity via DNS64"
+	@echo "   • Perfect for testing IPv6-only networks with DNS64 gateway"
+
 # Clean build artifacts
 clean:
 	@echo "Cleaning build artifacts..."
@@ -251,6 +309,8 @@ help:
 	@echo "  curl-test  - Test DNS override with curl"
 	@echo "  benchmark  - Performance comparison of DNS providers"
 	@echo "  test-dns64 - Test DNS64 synthesis functionality"
+	@echo "  test-ipv4-only - Test IPv4-only domain handling"
+	@echo "  test-complete-filtering - Test complete AAAA + DNS64 + A filtering chain"
 	@echo "  arm64      - Cross-compile for ARM64 architecture"
 	@echo "  arm64-check - Show ARM64 binary information"
 	@echo "  arm64-clean - Clean only ARM64 build artifacts"

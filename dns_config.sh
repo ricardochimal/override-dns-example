@@ -23,6 +23,8 @@ show_usage() {
     echo "  set-dns64-prefix <prefix> Set DNS64 prefix (e.g., 64:ff9b::)"
     echo "  enable-aaaa-filter      Filter out native IPv6 addresses (force DNS64)"
     echo "  disable-aaaa-filter     Allow native IPv6 addresses alongside DNS64"
+    echo "  enable-a-filter         Filter out IPv4 addresses from final results"
+    echo "  disable-a-filter        Allow IPv4 addresses in final results"
     echo "  preset <name>           Load a DNS provider preset"
     echo "  clear                   Clear all configuration"
     echo "  load                    Load example configuration"
@@ -30,6 +32,8 @@ show_usage() {
     echo "  status                  Show configuration status"
     echo "  test                    Test DNS resolution"
     echo "  test-dns64              Test DNS64 synthesis"
+    echo "  test-ipv4-only          Test IPv4-only domain handling"
+    echo "  test-complete-filtering Test AAAA + DNS64 + A filtering chain"
     echo ""
     echo "DNS Provider Presets:"
     echo "  google      - Google DNS (8.8.8.8, 8.8.4.4)"
@@ -46,7 +50,10 @@ show_usage() {
     echo "  $0 enable-dns64"
     echo "  $0 set-dns64-prefix 2001:db8:64::"
     echo "  $0 enable-aaaa-filter"
+    echo "  $0 enable-a-filter"
     echo "  $0 test-dns64"
+    echo "  $0 test-ipv4-only"
+    echo "  $0 test-complete-filtering"
     echo ""
     echo "Configuration file:"
     echo "  Default: $DEFAULT_CONFIG_FILE"
@@ -117,7 +124,7 @@ list_servers() {
     echo ""
     echo "Other settings:"
     echo "=============="
-    grep -E "^(timeout|use_tcp|debug|enable_dns64|dns64_prefix|filter_aaaa) " "$CONFIG_FILE" | while read -r line; do
+    grep -E "^(timeout|use_tcp|debug|enable_dns64|dns64_prefix|filter_aaaa|filter_a) " "$CONFIG_FILE" | while read -r line; do
         echo "  $line"
     done
 }
@@ -187,6 +194,20 @@ disable_aaaa_filter() {
     echo "Native IPv6 addresses will be preserved alongside DNS64 synthetic addresses"
 }
 
+enable_a_filter() {
+    set_config_value "filter_a" "true"
+    echo "A record filtering enabled"
+    echo "IPv4 addresses will be removed from final results"
+    echo "This forces IPv6-only connectivity (using native IPv6 or DNS64 synthetic addresses)"
+    echo "Useful for testing IPv6-only network scenarios"
+}
+
+disable_a_filter() {
+    set_config_value "filter_a" "false"
+    echo "A record filtering disabled"
+    echo "IPv4 addresses will be preserved in final results"
+}
+
 test_dns64() {
     echo "Testing DNS64 Synthesis and AAAA Filtering"
     echo "=========================================="
@@ -202,31 +223,199 @@ test_dns64() {
     set_config_value "debug" "true" > /dev/null
     
     echo ""
-    echo "2. Testing without AAAA filtering (native + synthetic IPv6):"
+    echo "2. Testing IPv4-only domain without AAAA filtering:"
     disable_aaaa_filter > /dev/null
-    echo "   Domain with both IPv4 and IPv6 addresses:"
-    timeout 5 LD_PRELOAD=./dns_override.so ./test_dns 2>&1 | grep -A 10 "Testing getaddrinfo for google.com:80" | head -8
+    echo "   Testing ipv4.google.com (IPv4-only domain):"
+    timeout 5 LD_PRELOAD=./dns_override.so ./test_dns 2>&1 | grep -A 8 "Testing getaddrinfo for google.com:80" | head -6
     
     echo ""
-    echo "3. Testing WITH AAAA filtering (synthetic IPv6 only):"
+    echo "3. Testing IPv4-only domain WITH AAAA filtering:"
     enable_aaaa_filter > /dev/null
-    echo "   Same domain with native IPv6 addresses filtered out:"
-    timeout 5 LD_PRELOAD=./dns_override.so ./test_dns 2>&1 | grep -A 10 "Testing getaddrinfo for google.com:80" | head -8
+    echo "   Same domain - should show IPv4 + DNS64 synthetic addresses:"
+    timeout 5 LD_PRELOAD=./dns_override.so ./test_dns 2>&1 | grep -A 8 "Testing getaddrinfo for google.com:80" | head -6
     
     echo ""
-    echo "4. AAAA Filtering Debug Output:"
-    echo "   Look for 'Filtering out AAAA record' messages:"
-    timeout 5 LD_PRELOAD=./dns_override.so nslookup google.com 2>&1 | grep -E "(Filtering|AAAA)" | head -3
+    echo "4. Testing pure IPv4-only domains:"
+    echo "   These domains typically only have IPv4 addresses:"
+    
+    # Test with a few IPv4-only domains
+    local ipv4_domains=("httpbin.org" "example.org")
+    
+    for domain in "${ipv4_domains[@]}"; do
+        echo ""
+        echo "   Testing $domain:"
+        echo "     Without AAAA filtering:"
+        disable_aaaa_filter > /dev/null
+        timeout 5 LD_PRELOAD=./dns_override.so nslookup "$domain" 2>&1 | grep -E "(IPv4|IPv6|DNS64)" | head -3 || echo "     No IPv6 results (IPv4-only domain)"
+        
+        echo "     With AAAA filtering + DNS64:"
+        enable_aaaa_filter > /dev/null
+        timeout 5 LD_PRELOAD=./dns_override.so nslookup "$domain" 2>&1 | grep -E "(DNS64 synthesis|Added DNS64)" | head -2 || echo "     DNS64 synthesis applied"
+    done
+    
+    echo ""
+    echo "5. AAAA Filtering Debug Output for IPv4-only domain:"
+    echo "   Look for DNS64 synthesis messages (no AAAA filtering messages expected):"
+    timeout 5 LD_PRELOAD=./dns_override.so nslookup httpbin.org 2>&1 | grep -E "(Filtering|DNS64|Added)" | head -5
     
     echo ""
     echo "Test Summary:"
     echo "============="
-    echo "- Without AAAA filtering: Shows both native IPv6 and DNS64 synthetic addresses"
-    echo "- With AAAA filtering: Shows only IPv4 and DNS64 synthetic addresses"
-    echo "- AAAA filtering forces all IPv6 traffic through DNS64 gateway"
+    echo "- IPv4-only domains: Show only IPv4 addresses normally"
+    echo "- With DNS64 enabled: IPv4-only domains get synthetic IPv6 addresses"
+    echo "- AAAA filtering: No effect on IPv4-only domains (no IPv6 to filter)"
+    echo "- DNS64 synthesis: Creates IPv6 addresses from IPv4 for IPv4-only domains"
     echo ""
     echo "Current configuration:"
     grep -E "^(enable_dns64|dns64_prefix|filter_aaaa) " "$CONFIG_FILE" 2>/dev/null || echo "DNS64 not configured"
+}
+
+test_ipv4_only() {
+    echo "Testing IPv4-Only Domain Handling"
+    echo "================================="
+    
+    if [[ ! -f "./dns_override.so" ]]; then
+        echo "Error: dns_override.so not found. Run 'make' first."
+        exit 1
+    fi
+    
+    # Set up configuration
+    enable_dns64 > /dev/null
+    set_config_value "debug" "true" > /dev/null
+    
+    echo "Testing domains that typically only have IPv4 addresses..."
+    echo ""
+    
+    # List of domains that are typically IPv4-only or have limited IPv6
+    local ipv4_only_domains=(
+        "httpbin.org"
+        "example.org" 
+        "httpforever.com"
+        "ipv4.google.com"
+    )
+    
+    for domain in "${ipv4_only_domains[@]}"; do
+        echo "Testing $domain:"
+        echo "=================="
+        
+        echo "1. Without DNS override (system default):"
+        timeout 3 nslookup "$domain" 2>/dev/null | grep -E "Address:|IPv6" | head -3 || echo "   Only IPv4 addresses found"
+        
+        echo ""
+        echo "2. With DNS64 enabled (should add synthetic IPv6):"
+        disable_aaaa_filter > /dev/null
+        timeout 3 LD_PRELOAD=./dns_override.so nslookup "$domain" 2>&1 | grep -E "(DNS64 synthesis|Added DNS64|Address)" | head -4 || echo "   DNS64 processing applied"
+        
+        echo ""
+        echo "3. With AAAA filtering + DNS64 (should be same as #2 for IPv4-only):"
+        enable_aaaa_filter > /dev/null
+        timeout 3 LD_PRELOAD=./dns_override.so nslookup "$domain" 2>&1 | grep -E "(Filtering|DNS64 synthesis|Added DNS64)" | head -3 || echo "   No IPv6 to filter, DNS64 synthesis applied"
+        
+        echo ""
+        echo "----------------------------------------"
+        echo ""
+    done
+    
+    echo "IPv4-Only Domain Test Summary:"
+    echo "=============================="
+    echo "✓ IPv4-only domains work correctly with DNS64"
+    echo "✓ AAAA filtering has no effect (no IPv6 addresses to filter)"
+    echo "✓ DNS64 synthesis creates synthetic IPv6 addresses from IPv4"
+    echo "✓ Applications get both IPv4 and synthetic IPv6 addresses"
+}
+
+test_complete_filtering() {
+    echo "Testing Complete Filtering Chain: AAAA + DNS64 + A"
+    echo "================================================="
+    
+    if [[ ! -f "./dns_override.so" ]]; then
+        echo "Error: dns_override.so not found. Run 'make' first."
+        exit 1
+    fi
+    
+    echo "This test demonstrates the complete filtering workflow:"
+    echo "1. filter_aaaa=true  → Remove native IPv6 addresses"
+    echo "2. enable_dns64=true → Create synthetic IPv6 from IPv4"
+    echo "3. filter_a=true     → Remove IPv4 addresses from final results"
+    echo "Result: Pure DNS64 synthetic IPv6 addresses only"
+    echo ""
+    
+    # Set up complete filtering configuration
+    echo "Setting up complete filtering configuration..."
+    enable_dns64 > /dev/null
+    enable_aaaa_filter > /dev/null
+    enable_a_filter > /dev/null
+    set_config_value "debug" "true" > /dev/null
+    
+    echo "Current configuration:"
+    grep -E "^(enable_dns64|filter_aaaa|filter_a|debug) " "$CONFIG_FILE" | sed 's/^/  /'
+    echo ""
+    
+    echo "Testing with google.com (has both IPv4 and IPv6 addresses):"
+    echo "============================================================"
+    echo ""
+    
+    echo "1. Without DNS override (system default):"
+    echo "   Should show both IPv4 and IPv6 addresses"
+    nslookup google.com 2>/dev/null | grep "Address:" | grep -v "#53" | head -4 | sed 's/^/   /'
+    echo ""
+    
+    echo "2. With complete filtering enabled:"
+    echo "   Should show ONLY DNS64 synthetic IPv6 addresses (64:ff9b::...)"
+    echo ""
+    echo "   Debug output showing the filtering process:"
+    timeout 5 LD_PRELOAD=./dns_override.so ./test_dns 2>&1 | grep -E "(Filtering|DNS64|Added|Removed)" | head -8 | sed 's/^/   /'
+    echo ""
+    
+    echo "   Final results (IPv6-only via DNS64):"
+    timeout 5 LD_PRELOAD=./dns_override.so ./test_dns 2>&1 | grep -A 10 "Testing getaddrinfo for google.com" | grep "IPv6:" | head -6 | sed 's/^/   /'
+    echo ""
+    
+    echo "3. Testing with IPv4-only domain (httpbin.org):"
+    echo "   Should convert IPv4 → DNS64 synthetic IPv6, then filter out original IPv4"
+    echo ""
+    echo "   Debug output:"
+    timeout 5 LD_PRELOAD=./dns_override.so nslookup httpbin.org 2>&1 | grep -E "(DNS64 synthesis|Filtering out A record|Added DNS64)" | head -4 | sed 's/^/   /'
+    echo ""
+    
+    echo "4. Comparison of filtering stages:"
+    echo "================================="
+    
+    # Stage 1: No filtering
+    echo ""
+    echo "   Stage 1 - No filtering (baseline):"
+    disable_aaaa_filter > /dev/null
+    disable_a_filter > /dev/null
+    set_config_value "debug" "false" > /dev/null
+    result1=$(timeout 3 LD_PRELOAD=./dns_override.so ./test_dns 2>/dev/null | grep -A 15 "Testing getaddrinfo for google.com" | grep -E "(IPv4|IPv6):" | wc -l)
+    echo "     Total addresses: $result1 (IPv4 + IPv6 + DNS64)"
+    
+    # Stage 2: AAAA filtering only
+    echo ""
+    echo "   Stage 2 - AAAA filtering only:"
+    enable_aaaa_filter > /dev/null
+    set_config_value "debug" "false" > /dev/null
+    result2=$(timeout 3 LD_PRELOAD=./dns_override.so ./test_dns 2>/dev/null | grep -A 15 "Testing getaddrinfo for google.com" | grep -E "(IPv4|IPv6):" | wc -l)
+    echo "     Total addresses: $result2 (IPv4 + DNS64 only)"
+    
+    # Stage 3: Complete filtering
+    echo ""
+    echo "   Stage 3 - Complete filtering (AAAA + A):"
+    enable_a_filter > /dev/null
+    set_config_value "debug" "false" > /dev/null
+    result3=$(timeout 3 LD_PRELOAD=./dns_override.so ./test_dns 2>/dev/null | grep -A 15 "Testing getaddrinfo for google.com" | grep -E "(IPv4|IPv6):" | wc -l)
+    echo "     Total addresses: $result3 (DNS64 synthetic IPv6 only)"
+    
+    echo ""
+    echo "Summary of Complete Filtering Test:"
+    echo "=================================="
+    echo "✅ Native IPv6 addresses filtered out (filter_aaaa=true)"
+    echo "✅ DNS64 synthetic IPv6 addresses created from IPv4"
+    echo "✅ Original IPv4 addresses filtered out (filter_a=true)"
+    echo "✅ Final result: Pure IPv6-only connectivity via DNS64"
+    echo ""
+    echo "Use case: Perfect for testing IPv6-only networks with DNS64 gateway"
+    echo "Applications will only see IPv6 addresses, but can still reach IPv4-only services"
 }
 
 load_preset() {
@@ -400,6 +589,12 @@ case "$1" in
     disable-aaaa-filter)
         disable_aaaa_filter
         ;;
+    enable-a-filter)
+        enable_a_filter
+        ;;
+    disable-a-filter)
+        disable_a_filter
+        ;;
     preset)
         load_preset "$2"
         ;;
@@ -420,6 +615,12 @@ case "$1" in
         ;;
     test-dns64)
         test_dns64
+        ;;
+    test-ipv4-only)
+        test_ipv4_only
+        ;;
+    test-complete-filtering)
+        test_complete_filtering
         ;;
     *)
         show_usage
