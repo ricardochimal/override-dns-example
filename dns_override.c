@@ -531,10 +531,10 @@ static int query_custom_dns(const char *hostname, int query_type, void *result_b
     // Try each configured DNS server
     for (int server_idx = 0; server_idx < config.server_count; server_idx++) {
         int sockfd;
-        struct sockaddr_in server_addr;
+        int family = config.dns_families[server_idx];
         
-        // Create socket
-        sockfd = socket(AF_INET, config.use_tcp ? SOCK_STREAM : SOCK_DGRAM, 0);
+        // Create socket with appropriate family (IPv4 or IPv6)
+        sockfd = socket(family, config.use_tcp ? SOCK_STREAM : SOCK_DGRAM, 0);
         if (sockfd < 0) {
             continue;
         }
@@ -546,18 +546,42 @@ static int query_custom_dns(const char *hostname, int query_type, void *result_b
         setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
         
-        // Setup server address
-        memset(&server_addr, 0, sizeof(server_addr));
-        server_addr.sin_family = AF_INET;
-        server_addr.sin_port = htons(config.dns_ports[server_idx]);
-        
-        if (inet_pton(AF_INET, config.dns_servers[server_idx], &server_addr.sin_addr) != 1) {
-            close(sockfd);
-            continue;
-        }
-        
-        // Connect to DNS server
-        if (connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        // Setup server address based on family
+        if (family == AF_INET) {
+            // IPv4 setup
+            struct sockaddr_in server_addr4;
+            memset(&server_addr4, 0, sizeof(server_addr4));
+            server_addr4.sin_family = AF_INET;
+            server_addr4.sin_port = htons(config.dns_ports[server_idx]);
+            
+            if (inet_pton(AF_INET, config.dns_servers[server_idx], &server_addr4.sin_addr) != 1) {
+                close(sockfd);
+                continue;
+            }
+            
+            // Connect to IPv4 DNS server
+            if (connect(sockfd, (struct sockaddr*)&server_addr4, sizeof(server_addr4)) < 0) {
+                close(sockfd);
+                continue;
+            }
+        } else if (family == AF_INET6) {
+            // IPv6 setup
+            struct sockaddr_in6 server_addr6;
+            memset(&server_addr6, 0, sizeof(server_addr6));
+            server_addr6.sin6_family = AF_INET6;
+            server_addr6.sin6_port = htons(config.dns_ports[server_idx]);
+            
+            if (inet_pton(AF_INET6, config.dns_servers[server_idx], &server_addr6.sin6_addr) != 1) {
+                close(sockfd);
+                continue;
+            }
+            
+            // Connect to IPv6 DNS server
+            if (connect(sockfd, (struct sockaddr*)&server_addr6, sizeof(server_addr6)) < 0) {
+                close(sockfd);
+                continue;
+            }
+        } else {
             close(sockfd);
             continue;
         }
@@ -567,8 +591,9 @@ static int query_custom_dns(const char *hostname, int query_type, void *result_b
         close(sockfd);
         
         if (config.debug) {
-            fprintf(stderr, "[DNS Override] Using DNS server %s:%d\n", 
-                   config.dns_servers[server_idx], config.dns_ports[server_idx]);
+            const char* family_str = (family == AF_INET6) ? "IPv6" : "IPv4";
+            fprintf(stderr, "[DNS Override] Using %s DNS server %s:%d\n", 
+                   family_str, config.dns_servers[server_idx], config.dns_ports[server_idx]);
         }
         
         // Modify resolv.conf temporarily or use res_ninit with custom configuration
