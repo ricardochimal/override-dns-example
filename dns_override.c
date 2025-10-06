@@ -677,22 +677,26 @@ int getaddrinfo(const char *node, const char *service,
     _res.nscount = 0;
     _res._u._ext.nscount6 = 0;
     
-    for (int i = 0; i < config.server_count && i < MAXNS; i++) {
-        if (config.dns_families[i] == AF_INET) {
+    int ipv4_index = 0;
+    int ipv6_index = 0;
+    
+    for (int i = 0; i < config.server_count && (ipv4_index < MAXNS || ipv6_index < MAXNS); i++) {
+        if (config.dns_families[i] == AF_INET && ipv4_index < MAXNS) {
             // IPv4 nameserver
-            struct sockaddr_in *ns = (struct sockaddr_in*)&_res.nsaddr_list[i];
+            struct sockaddr_in *ns = (struct sockaddr_in*)&_res.nsaddr_list[ipv4_index];
             memset(ns, 0, sizeof(*ns));
             ns->sin_family = AF_INET;
             ns->sin_port = htons(config.dns_ports[i]);
             
             if (inet_pton(AF_INET, config.dns_servers[i], &ns->sin_addr) == 1) {
                 _res.nscount++;
+                ipv4_index++;
                 if (config.debug && node) {
                     fprintf(stderr, "[DNS Override] Using IPv4 nameserver: %s:%d for %s\n", 
                            config.dns_servers[i], config.dns_ports[i], node);
                 }
             }
-        } else if (config.dns_families[i] == AF_INET6 && _res._u._ext.nscount6 < MAXNS) {
+        } else if (config.dns_families[i] == AF_INET6 && ipv6_index < MAXNS) {
             // IPv6 nameserver - allocate and store in the nsaddrs array
             struct sockaddr_in6 *ns6 = calloc(1, sizeof(struct sockaddr_in6));
             if (ns6) {
@@ -700,8 +704,19 @@ int getaddrinfo(const char *node, const char *service,
                 ns6->sin6_port = htons(config.dns_ports[i]);
                 
                 if (inet_pton(AF_INET6, config.dns_servers[i], &ns6->sin6_addr) == 1) {
-                    _res._u._ext.nsaddrs[_res._u._ext.nscount6] = ns6;
+                    _res._u._ext.nsaddrs[ipv6_index] = ns6;
                     _res._u._ext.nscount6++;
+                    
+                    // Also add a placeholder in the main nsaddr_list to indicate total count
+                    // This is needed for the resolver to recognize we have nameservers
+                    if (_res.nscount < MAXNS) {
+                        struct sockaddr_in *placeholder = (struct sockaddr_in*)&_res.nsaddr_list[_res.nscount];
+                        memset(placeholder, 0, sizeof(*placeholder));
+                        placeholder->sin_family = AF_UNSPEC; // Mark as unspecified/placeholder
+                        _res.nscount++;
+                    }
+                    
+                    ipv6_index++;
                     if (config.debug && node) {
                         fprintf(stderr, "[DNS Override] Using IPv6 nameserver: %s:%d for %s\n", 
                                config.dns_servers[i], config.dns_ports[i], node);
@@ -784,6 +799,43 @@ int getaddrinfo(const char *node, const char *service,
     
     // Restore original resolver state
     memcpy(&_res, &original_state, sizeof(_res));
+    
+    // Debug: Print final list of addresses being returned
+    if (config.debug && node && result == 0 && *res) {
+        fprintf(stderr, "[DNS Override] ===== Final addresses returned for %s =====\n", node);
+        int addr_count = 0;
+        struct addrinfo *current = *res;
+        while (current) {
+            addr_count++;
+            char addr_str[INET6_ADDRSTRLEN];
+            const char *family_str;
+            int port = 0;
+            
+            if (current->ai_family == AF_INET) {
+                struct sockaddr_in *ipv4 = (struct sockaddr_in *)current->ai_addr;
+                inet_ntop(AF_INET, &ipv4->sin_addr, addr_str, sizeof(addr_str));
+                port = ntohs(ipv4->sin_port);
+                family_str = "IPv4";
+            } else if (current->ai_family == AF_INET6) {
+                struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)current->ai_addr;
+                inet_ntop(AF_INET6, &ipv6->sin6_addr, addr_str, sizeof(addr_str));
+                port = ntohs(ipv6->sin6_port);
+                family_str = "IPv6";
+            } else {
+                snprintf(addr_str, sizeof(addr_str), "unknown family %d", current->ai_family);
+                family_str = "????";
+            }
+            
+            fprintf(stderr, "[DNS Override]   %d. %s: %s", addr_count, family_str, addr_str);
+            if (port > 0) {
+                fprintf(stderr, ":%d", port);
+            }
+            fprintf(stderr, "\n");
+            
+            current = current->ai_next;
+        }
+        fprintf(stderr, "[DNS Override] ===== Total: %d address(es) =====\n", addr_count);
+    }
     
     if (config.debug && node) {
         if (result == 0) {
